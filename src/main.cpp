@@ -1,13 +1,7 @@
-#include <stdio.h>
+#include <time.h>
+#include <fcntl.h>
 #include <intrin.h>
 #include <iostream>
-#include <time.h>
-#include <wchar.h>
-#include <stdio.h>
-#include <locale.h>
-#include <stdlib.h>
-#include <io.h>
-#include <fcntl.h>
 
 
 static const int PANEL_main_menu = 0;
@@ -18,7 +12,8 @@ static const int PANEL_input_n = 4;
 static const int PANEL_mult = 5;
 static const int PANEL_settings = 6;
 
-static const char* TEXT_variants[10] = {
+static const char* TEXT_variants[11] = {
+    "A * x",
     "a * (A * x) + b * (B * y)",
     "A * x + b * (B * y)",
     "a * (A * x) + B * y",
@@ -34,10 +29,26 @@ static const char* TEXT_types[3] = {
     "int", "float", "double"
 };
 
+static const bool ARG_requirements[11][6] = {
+    { 0, 0, 1, 0, 1, 0 },
+    { 1, 1, 1, 1, 1, 1 },
+    { 0, 1, 1, 1, 1, 1 },
+    { 1, 0, 1, 1, 1, 1 },
+    { 1, 0, 1, 0, 1, 1 },
+    { 1, 1, 0, 1, 1, 1 },
+    { 1, 1, 1, 1, 1, 1 },
+    { 0, 1, 1, 1, 1, 1 },
+    { 1, 0, 1, 1, 1, 1 },
+    { 1, 0, 1, 0, 1, 1 },
+    { 1, 1, 0, 1, 1, 1 }
+};
+
 static bool SETTING_save_input = false;
 static bool SETTING_save_output = false;
 static bool SETTING_save_result = false;
+static bool SETTING_auto = false;
 static bool SETTING_target = false;
+static int SETTING_auto_variant = 0;
 
 static int op_variant, op_type, op_n;
 
@@ -72,6 +83,236 @@ double winputf(const wchar_t *text, Args... args) {
     return value;
 }
 
+
+// --- v0
+
+
+void v0_base_int(int n, int* A, int* x, int* r) {
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = 0; j < n; j++)
+            r[i] += A[i * n + j] * x[j];
+}
+
+void v0_sse_int(int n, int* A, int* x, int* r) {
+    __m128i* sex_A = (__m128i*)A;
+    __m128i* sex_x = (__m128i*)x;
+    __m128i* sex_r = (__m128i*)r;
+
+    int n4 = n / 4;
+    int sum[4];
+
+    for (int i = 0; i < n4; i++) {
+        for (int si = 0; si < 4; si++) {
+            __m128i sex_sum = _mm_setzero_si128();
+            __m128i* sex_Ai = sex_A + (i * 4 + si) * n4;
+
+            for (int j = 0; j < n4; j++)
+                sex_sum = _mm_add_epi32(sex_sum, _mm_mullo_epi32(sex_Ai[j], sex_x[j]));
+
+            sex_sum = _mm_hadd_epi32(sex_sum, sex_sum);
+            sum[si] = _mm_cvtsi128_si32(_mm_hadd_epi32(sex_sum, sex_sum));
+        }
+
+        sex_r[i] = _mm_add_epi32(sex_r[i], _mm_loadu_si128((__m128i*)sum));
+    }
+}
+
+void v0_avx_int(int n, int* A, int* x, int* r) {
+    __m256i* ssex_A = (__m256i*)A;
+    __m256i* ssex_x = (__m256i*)x;
+    __m256i* ssex_r = (__m256i*)r;
+
+    int n8 = n / 8;
+    int sum[8];
+
+    for (int i = 0; i < n8; i++) {
+        for (int si = 0; si < 8; si++) {
+            __m256i ssex_sum = _mm256_setzero_si256();
+            __m256i* ssex_Ai = ssex_A + (i * 8 + si) * n8;
+
+            for (int j = 0; j < n8; j++)
+                ssex_sum = _mm256_add_epi32(
+                    ssex_sum, _mm256_mullo_epi32(ssex_Ai[j], ssex_x[j])
+                );
+
+            __m128i sum128 = _mm_add_epi32(
+                _mm256_castsi256_si128(ssex_sum),
+                _mm256_extracti128_si256(ssex_sum, 1)
+            );
+
+            sum128 = _mm_hadd_epi32(sum128, sum128);
+            sum[si] = _mm_cvtsi128_si32(_mm_hadd_epi32(sum128, sum128));
+        }
+
+        ssex_r[i] = _mm256_add_epi32(
+            ssex_r[i],
+            _mm256_loadu_si256((__m256i*)sum)
+        );
+    }
+}
+
+
+void v0_base_float(int n, float* A, float* x, float* r) {
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = 0; j < n; j++)
+            r[i] += A[i * n + j] * x[j];
+}
+
+void v0_sse_float(int n, float* A, float* x, float* r) {
+    __m128* sex_A = (__m128*)A;
+    __m128* sex_x = (__m128*)x;
+    __m128* sex_r = (__m128*)r;
+
+    int n4 = n / 4;
+    float sum[4];
+
+    for (int i = 0; i < n4; i++) {
+        for (int si = 0; si < 4; si++) {
+            __m128 sex_sum = _mm_setzero_ps();
+            __m128* sex_Ai = sex_A + (i * 4 + si) * n4;
+
+            for (int j = 0; j < n4; j++)
+                sex_sum = _mm_add_ps(sex_sum, _mm_mul_ps(sex_Ai[j], sex_x[j]));
+
+            __m128 sex_shuf = _mm_movehdup_ps(sex_sum);
+            sex_sum = _mm_add_ps(sex_sum, sex_shuf);
+            sum[si] = _mm_cvtss_f32(_mm_add_ss(sex_sum, _mm_movehl_ps(sex_shuf, sex_sum)));
+        }
+
+        sex_r[i] = _mm_add_ps(sex_r[i], _mm_loadu_ps(sum));
+    }
+}
+
+void v0_avx_float(int n, float* A, float* x, float* r) {
+    __m256* ssex_A = (__m256*)A;
+    __m256* ssex_x = (__m256*)x;
+    __m256* ssex_r = (__m256*)r;
+
+    int n8 = n / 8;
+    float sum[8];
+
+    for (int i = 0; i < n8; i++) {
+        for (int si = 0; si < 8; si++) {
+            __m256 ssex_sum = _mm256_setzero_ps();
+            __m256* ssex_Ai = ssex_A + (i * 8 + si) * n8;
+
+            for (int j = 0; j < n8; j++)
+                ssex_sum = _mm256_add_ps(ssex_sum, _mm256_mul_ps(ssex_Ai[j], ssex_x[j]));
+
+            __m128 sex_sum = _mm_add_ps(
+                _mm256_castps256_ps128(ssex_sum),
+                _mm256_extractf128_ps(ssex_sum, 1)
+            );
+            __m128 sex_shuf = _mm_movehdup_ps(sex_sum);
+            sex_sum = _mm_add_ps(sex_sum, sex_shuf);
+            sum[si] = _mm_cvtss_f32(_mm_add_ss(sex_sum, _mm_movehl_ps(sex_shuf, sex_sum)));
+        }
+
+        ssex_r[i] = _mm256_add_ps(ssex_r[i], _mm256_loadu_ps(sum));
+    }
+}
+
+
+void v0_base_double(int n, double* A, double* x, double* r) {
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = 0; j < n; j++)
+            r[i] += A[i * n + j] * x[j];
+}
+
+void v0_sse_double(int n, double* A, double* x, double* r) {
+    __m128d* sex_A = (__m128d*)A;
+    __m128d* sex_x = (__m128d*)x;
+    __m128d* sex_r = (__m128d*)r;
+
+    int n2 = n / 2;
+    double sum[2];
+
+    for (int i = 0; i < n2; i++) {
+        for (int si = 0; si < 2; si++) {
+            __m128d sex_sum = _mm_setzero_pd();
+            __m128d* sex_Ai = sex_A + (i * 2 + si) * n2;
+
+            for (int j = 0; j < n2; j++)
+                sex_sum = _mm_add_pd(sex_sum, _mm_mul_pd(sex_Ai[j], sex_x[j]));
+
+            sex_sum = _mm_add_pd(sex_sum, _mm_shuffle_pd(sex_sum, sex_sum, 0x1));
+            sum[si] = _mm_cvtsd_f64(sex_sum);
+        }
+
+        sex_r[i] = _mm_add_pd(sex_r[i], _mm_loadu_pd(sum));
+    }
+}
+
+void v0_avx_double(int n, double* A, double* x, double* r) {
+    __m256d* ssex_A = (__m256d*)A;
+    __m256d* ssex_x = (__m256d*)x;
+    __m256d* ssex_r = (__m256d*)r;
+
+    int n4 = n / 4;
+    double sum[4];
+
+    for (int i = 0; i < n4; i++) {
+        for (int si = 0; si < 4; si++) {
+            __m256d ssex_sum = _mm256_setzero_pd();
+            __m256d* ssex_Ai = ssex_A + (i * 4 + si) * n4;
+
+            for (int j = 0; j < n4; j++)
+                ssex_sum = _mm256_add_pd(ssex_sum, _mm256_mul_pd(ssex_Ai[j], ssex_x[j]));
+
+            __m128d sex_sum = _mm_add_pd(
+                _mm256_castpd256_pd128(ssex_sum), 
+                _mm256_extractf128_pd(ssex_sum, 1)
+            );
+
+            sum[si] = _mm_cvtsd_f64(_mm_hadd_pd(sex_sum, sex_sum));
+        }
+
+        ssex_r[i] = _mm256_add_pd(ssex_r[i], _mm256_loadu_pd(sum));
+    }
+}
+
+
+void call_v0_base_int(int n, int a, int b, int* A, int* B, int* x, int* y, int* r) {
+    v0_base_int(n, A, x, r);
+}
+
+void call_v0_sse_int(int n, int a, int b, int* A, int* B, int* x, int* y, int* r) {
+    v0_sse_int(n, A, x, r);
+}
+
+void call_v0_avx_int(int n, int a, int b, int* A, int* B, int* x, int* y, int* r) {
+    v0_avx_int(n, A, x, r);
+}
+
+
+void call_v0_base_float(int n, float a, float b, float* A, float* B, float* x, float* y, float* r) {
+    v0_base_float(n, A, x, r);
+}
+
+void call_v0_sse_float(int n, float a, float b, float* A, float* B, float* x, float* y, float* r) {
+    v0_sse_float(n, A, x, r);
+}
+
+void call_v0_avx_float(int n, float a, float b, float* A, float* B, float* x, float* y, float* r) {
+    v0_avx_float(n, A, x, r);
+}
+
+
+void call_v0_base_double(int n, double a, double b, double* A, double* B, double* x, double* y, double* r) {
+    v0_base_double(n, A, x, r);
+}
+
+void call_v0_sse_double(int n, double a, double b, double* A, double* B, double* x, double* y, double* r) {
+    v0_sse_double(n, A, x, r);
+}
+
+void call_v0_avx_double(int n, double a, double b, double* A, double* B, double* x, double* y, double* r) {
+    v0_avx_double(n, A, x, r);
+}
+
+
+
+// --- v0
 // --- v1
 
 
@@ -3005,6 +3246,7 @@ void print_cpuid() {
 void print_input_variant() {
     wprintf(
         L"Варіанти завдань множення матриць з векторами та скалярами:\n"
+        L" 0. Операція Ax\n"
         L" 1. Операція aAx + bBy\n"
         L" 2. Операція  Ax + bBy\n"
         L" 3. Операція aAx +  By\n"
@@ -3043,105 +3285,153 @@ void measure_time(
     void (*call_avx)(int, T, T, T*, T*, T*, T*, T*)
 ) {
     char filepath[200] = "results\\result-";
+    const bool* requirements = ARG_requirements[op_variant];
 
-    T a = rand() % 200 - 100;
-    T b = rand() % 200 - 100;
-    T* A = (T*)_mm_malloc(op_n * op_n * sizeof(T), 32);
-    T* B = (T*)_mm_malloc(op_n * op_n * sizeof(T), 32);
-    T* x = (T*)_mm_malloc(op_n * sizeof(T), 32);
-    T* y = (T*)_mm_malloc(op_n * sizeof(T), 32);
+    T a, b, *A, *B, *x, *y; 
+    
+    if (requirements[0])
+        a = rand() % 200 - 100;
+    
+    if (requirements[1])
+        b = rand() % 200 - 100;
+    
+    if (requirements[2]) {
+        A = (T*)_mm_malloc(op_n * op_n * sizeof(T), 32);
+        
+        for (size_t i = 0; i < op_n * op_n; i++)
+            A[i] = rand() % 200 - 100;
+    }
+    
+    if (requirements[3]) {
+        B = (T*)_mm_malloc(op_n * op_n * sizeof(T), 32);
+        
+        for (size_t i = 0; i < op_n * op_n; i++)
+            B[i] = rand() % 200 - 100;
+    }
+
+    if (requirements[4]) {
+        x = (T*)_mm_malloc(op_n * sizeof(T), 32);
+
+        for (size_t i = 0; i < op_n; i++)
+            x[i] = rand() % 200 - 100;
+    }
+
+    if (requirements[5]) {
+        y = (T*)_mm_malloc(op_n * sizeof(T), 32);
+
+        for (size_t i = 0; i < op_n; i++)
+            y[i] = rand() % 200 - 100;
+    }
+    
     T* r = (T*)_mm_malloc(op_n * sizeof(T), 32);
 
-    for (size_t i = 0; i < op_n * op_n; i++) {
-        A[i] = rand() % 200 - 100;
-        B[i] = rand() % 200 - 100;
-    }
-
-    for (size_t i = 0; i < op_n; i++) {
-        x[i] = rand() % 200 - 100;
-        y[i] = rand() % 200 - 100;
-    }
-
     if (SETTING_save_result) {
-        time_t now = time(NULL);
-        struct tm *t = localtime(&now);
+        if (SETTING_auto) {
+            char buffer[32];
 
-        char buffer[100];
-        strftime(buffer, sizeof(buffer), "%d.%m.%Y-%H-%M-%S", t);
+            snprintf(buffer, sizeof(buffer), "%d-%d-%d", op_variant, op_type, op_n);
+            strcat(filepath, buffer);
+        }
+        else {
+            time_t now = time(NULL);
+            struct tm *t = localtime(&now);
 
-        strcat(filepath, buffer);
+            char buffer[100];
+            strftime(buffer, sizeof(buffer), "%d.%m.%Y-%H-%M-%S", t);
+
+            strcat(filepath, buffer);
+        }
+        
         strcat(filepath, ".txt");
 
         FILE *fp = fopen(filepath, "a");
 
-        fprintf(fp, "Операція: %s\n", TEXT_variants[op_variant - 1]);
+        fprintf(fp, "Операція: %s\n", TEXT_variants[op_variant]);
         fprintf(fp, "Тип: %s\n", TEXT_types[op_type - 1]);
         fprintf(fp, "N=%d\n", op_n);
 
         if (SETTING_save_input) {
-            if constexpr (std::is_same_v<T, int>)
-                fprintf(fp, "a=%4d\n", a);
-            else
-                fprintf(fp, "a=%6.1f\n", a);
+            if (requirements[0]) {
+                if constexpr (std::is_same_v<T, int>)
+                    fprintf(fp, "a=%4d\n", a);
+                else
+                    fprintf(fp, "a=%6.1f\n", a);
+            }
 
-            if constexpr (std::is_same_v<T, int>)
-                fprintf(fp, "b=%4d\n", b);
-            else
-                fprintf(fp, "b=%6.1f\n", b);
+            if (requirements[1]) {
+                if constexpr (std::is_same_v<T, int>)
+                    fprintf(fp, "b=%4d\n", b);
+                else
+                    fprintf(fp, "b=%6.1f\n", b);
+            }
 
-            fprintf(fp, "A=");
+            if (requirements[2]) {
+                fprintf(fp, "A=");
 
-            if constexpr (std::is_same_v<T, int>)
-                for (size_t i = 0; i < op_n; i++) {            
-                    fprintf(fp, "\n  ");
+                if constexpr (std::is_same_v<T, int>)
+                    for (size_t i = 0; i < op_n; i++) {            
+                        fprintf(fp, "\n  ");
 
-                    for (size_t j = 0; j < op_n; j++)
-                        fprintf(fp, "%4d ", A[i * op_n + j]);            
-                }
-            else
-                for (size_t i = 0; i < op_n; i++) {            
-                    fprintf(fp, "\n  ");
+                        for (size_t j = 0; j < op_n; j++)
+                            fprintf(fp, "%4d ", A[i * op_n + j]);            
+                    }
+                else
+                    for (size_t i = 0; i < op_n; i++) {            
+                        fprintf(fp, "\n  ");
 
-                    for (size_t j = 0; j < op_n; j++)
-                        fprintf(fp, "%6.1f ", A[i * op_n + j]);            
-                }
+                        for (size_t j = 0; j < op_n; j++)
+                            fprintf(fp, "%6.1f ", A[i * op_n + j]);            
+                    }
 
-            fprintf(fp, "\nB=");
+                fprintf(fp, "\n");
+            }
 
-            if constexpr (std::is_same_v<T, int>)
-                for (size_t i = 0; i < op_n; i++) {            
-                    fprintf(fp, "\n  ");
+            if (requirements[3]) {
+                fprintf(fp, "B=");
 
-                    for (size_t j = 0; j < op_n; j++)
-                        fprintf(fp, "%4d ", B[i * op_n + j]);            
-                }
-            else
-                for (size_t i = 0; i < op_n; i++) {            
-                    fprintf(fp, "\n  ");
+                if constexpr (std::is_same_v<T, int>)
+                    for (size_t i = 0; i < op_n; i++) {            
+                        fprintf(fp, "\n  ");
 
-                    for (size_t j = 0; j < op_n; j++)
-                        fprintf(fp, "%6.1f ", B[i * op_n + j]);            
-                }
+                        for (size_t j = 0; j < op_n; j++)
+                            fprintf(fp, "%4d ", B[i * op_n + j]);            
+                    }
+                else
+                    for (size_t i = 0; i < op_n; i++) {            
+                        fprintf(fp, "\n  ");
 
-            fprintf(fp, "\nx=\n  ");
+                        for (size_t j = 0; j < op_n; j++)
+                            fprintf(fp, "%6.1f ", B[i * op_n + j]);            
+                    }
 
-            if constexpr (std::is_same_v<T, int>)
-                for (size_t i = 0; i < op_n; i++)
-                    fprintf(fp, "%4d ", x[i]);
-            else 
-                for (size_t i = 0; i < op_n; i++)
-                    fprintf(fp, "%6.1f ", x[i]);
+                fprintf(fp, "\n");
+            }
 
-            fprintf(fp, "\ny=\n  ");
+            if (requirements[4]) {
+                fprintf(fp, "x=\n  ");
 
-            if constexpr (std::is_same_v<T, int>)
-                for (size_t i = 0; i < op_n; i++)
-                    fprintf(fp, "%4d ", y[i]);
-            else
-                for (size_t i = 0; i < op_n; i++)
-                    fprintf(fp, "%6.1f ", y[i]);
+                if constexpr (std::is_same_v<T, int>)
+                    for (size_t i = 0; i < op_n; i++)
+                        fprintf(fp, "%4d ", x[i]);
+                else 
+                    for (size_t i = 0; i < op_n; i++)
+                        fprintf(fp, "%6.1f ", x[i]);
 
-            fprintf(fp, "\n");
+                fprintf(fp, "\n");
+            }
+
+            if (requirements[5]) {
+                fprintf(fp, "y=\n  ");
+
+                if constexpr (std::is_same_v<T, int>)
+                    for (size_t i = 0; i < op_n; i++)
+                        fprintf(fp, "%4d ", y[i]);
+                else
+                    for (size_t i = 0; i < op_n; i++)
+                        fprintf(fp, "%6.1f ", y[i]);
+
+                fprintf(fp, "\n");
+            }
         }
 
         fclose(fp);
@@ -3169,9 +3459,11 @@ void measure_time(
             else
                 for (size_t i = 0; i < op_n; i++)
                     fprintf(fp, "%10.1f ", r[i]);
+
+            fprintf(fp, "\n");
         }
 
-        fprintf(fp, "\nЧас виконання: %f секунд\n", s);
+        fprintf(fp, "Час виконання: %f секунд\n", s);
 
         fclose(fp);
     }
@@ -3198,9 +3490,11 @@ void measure_time(
             else
                 for (size_t i = 0; i < op_n; i++)
                     fprintf(fp, "%10.1f ", r[i]);
+
+            fprintf(fp, "\n");
         }
 
-        fprintf(fp, "\nЧас виконання SSE: %f секунд\n", s);
+        fprintf(fp, "Час виконання SSE: %f секунд\n", s);
 
         fclose(fp);
     }
@@ -3227,18 +3521,28 @@ void measure_time(
             else
                 for (size_t i = 0; i < op_n; i++)
                     fprintf(fp, "%10.1f ", r[i]);
+
+            fprintf(fp, "\n");
         }
 
-        fprintf(fp, "\nЧас виконання AVX: %f секунд\n", s);
+        fprintf(fp, "Час виконання AVX: %f секунд\n", s);
         wprintf(L"Файл: \"%hs\"\n", filepath);
 
         fclose(fp);
     }
 
-    _mm_free(A);
-    _mm_free(B);
-    _mm_free(x);
-    _mm_free(y);
+    if (requirements[2])
+        _mm_free(A);
+        
+    if (requirements[3])
+        _mm_free(B);
+
+    if (requirements[4])
+        _mm_free(x);
+
+    if (requirements[5])
+        _mm_free(y);
+
     _mm_free(r);
 }
 
@@ -3246,6 +3550,38 @@ void measure_time(
 void process_variant() {
     switch (op_variant)
     {
+    case 0: {
+        switch (op_type)
+        {
+        case 1:
+            measure_time<int>(
+                call_v0_base_int, 
+                call_v0_sse_int, 
+                call_v0_avx_int
+            );
+
+            break;
+        case 2:
+            measure_time<float>(
+                call_v0_base_float, 
+                call_v0_sse_float, 
+                call_v0_avx_float
+            );
+
+            break;
+        case 3:
+            measure_time<double>(
+                call_v0_base_double, 
+                call_v0_sse_double, 
+                call_v0_avx_double
+            );
+
+            break;
+        };
+
+        break;
+    }
+
     case 1: {
         switch (op_type)
         {
@@ -3571,7 +3907,7 @@ void process_variant() {
 void print_mult() {
     wprintf(
         L"Виконуємо операцію %hs для типу %hs з розміром матриці N=%d...\n",
-        (unsigned char*)TEXT_variants[op_variant - 1], 
+        (unsigned char*)TEXT_variants[op_variant], 
         (unsigned char*)TEXT_types[op_type - 1], 
         op_n
     );
@@ -3648,7 +3984,7 @@ int process_input(int action, int& menu_panel) {
     }
 
     case PANEL_input_variant: {
-        if (action > 0 && action < 12) {
+        if (action >= 0 && action < 12) {
             if (action == 11)
                 menu_panel = PANEL_main_menu;
             else {
@@ -3813,7 +4149,15 @@ int main(int argc, char* argv[]) {
     for (size_t i = 0; i < argc; i++) {
         char* arg = argv[i];
 
-        if (strcmp(arg, "--target") == 0) {
+        if (strcmp(arg, "--auto") == 0)
+            SETTING_auto = true;
+        else if (strcmp(arg, "--auto-from") == 0) {
+            SETTING_auto = true;
+            SETTING_auto_variant = atoi(argv[i + 1]);
+            
+            i += 1;
+        }
+        else if (strcmp(arg, "--target") == 0) {
             SETTING_target = true;
 
             op_variant = atoi(argv[i + 1]);
@@ -3830,7 +4174,17 @@ int main(int argc, char* argv[]) {
             SETTING_save_output = true;
     }
 
-    if (SETTING_target)
+    if (SETTING_auto)
+        for (size_t i = SETTING_auto_variant; i <= 10; i++)
+            for (size_t j = 1; j <= 3; j++)
+                for (size_t n = 512; n <= 20480; n += 512) {
+                    op_variant = i;
+                    op_type = j;
+                    op_n = n;
+                    
+                    process_variant();
+                }
+    else if (SETTING_target)
         process_variant();
     else
         main_loop();
