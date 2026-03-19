@@ -1,3 +1,4 @@
+#include <io.h>
 #include <time.h>
 #include <fcntl.h>
 #include <intrin.h>

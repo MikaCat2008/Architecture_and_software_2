@@ -4,10 +4,10 @@ from openpyxl import load_workbook
 
 variants = defaultdict(lambda: defaultdict(dict))
 
-for file in listdir("bin/results/"):
+for file in listdir("results/"):
     _, variant_s, type_s, right = file.split("-")
     n_s = right.split(".")[0]
-    txt_lines = open(f"bin/results/{file}").read().split("\n")
+    txt_lines = open(f"results/{file}").read().split("\n")
 
     variants[int(variant_s)][int(type_s)][int(n_s)] = [
         float(txt_lines[3].split(":")[1][:-6]), 

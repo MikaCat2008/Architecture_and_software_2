@@ -1,2 +1,2 @@
-*.o
-*.chatgpt.txt
+bin/
+build/
